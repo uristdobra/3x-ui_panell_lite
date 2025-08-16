@@ -26,7 +26,7 @@ wait_for_enter() {
 
 # Установка 3X-UI
 if ! command -v x-ui &> /dev/null; then
-  bash <(curl -Ls curl https://raw.githubusercontent.com/jameszeroX/XKeen/main/install.sh)
+  bash <(curl -Ls curl https://raw.githubusercontent.com/jameszeroX/XKeen/main/install.sh && chmod +x ./install.sh && ./install.sh)
     if [ $? -ne 0 ]; then
     exit 1
   fi
