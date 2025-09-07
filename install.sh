@@ -12,7 +12,8 @@ if [ "${EUID:-0}" -ne 0 ]; then
 fi
 
 # Установка зависимостей
-apt update && apt install -y curl wget socat openssl sqlite3
+export DEBIAN_FRONTEND=noninteractive
+apt update && apt install -y curl wget socat openssl sqlite3 jq
 
 # Установка 3x-ui
 if ! command -v x-ui &> /dev/null; then
@@ -39,15 +40,28 @@ echo "Сертификат создан:"
 echo " - $CERT_DIR/self_signed.crt"
 echo " - $CERT_DIR/self_signed.key"
 
-# Настройка панели на использование SSL
+# Определяем тип конфигурации панели
 DB_PATH="/etc/x-ui/x-ui.db"
+JSON_PATH="/etc/x-ui/config.json"
+UPDATED=0
+
 if [ -f "$DB_PATH" ]; then
-  echo "Обновляем конфигурацию панели (SQLite)..."
-  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.crt' WHERE key='webCertFile';"
-  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.key' WHERE key='webKeyFile';"
-  sqlite3 "$DB_PATH" "UPDATE setting SET value='1' WHERE key='webEnableTLS';"
+  echo "Обновляем конфигурацию панели через SQLite..."
+  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.crt' WHERE key='webCertFile';" || true
+  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.key' WHERE key='webKeyFile';" || true
+  sqlite3 "$DB_PATH" "UPDATE setting SET value='1' WHERE key='webEnableTLS';" || true
+  UPDATED=1
+elif [ -f "$JSON_PATH" ]; then
+  echo "Обновляем конфигурацию панели через config.json..."
+  tmp=$(mktemp)
+  jq \
+    --arg crt "$CERT_DIR/self_signed.crt" \
+    --arg key "$CERT_DIR/self_signed.key" \
+    '.webCertFile=$crt | .webKeyFile=$key | .webEnableTLS=true' \
+    "$JSON_PATH" > "$tmp" && mv "$tmp" "$JSON_PATH"
+  UPDATED=1
 else
-  echo "ВНИМАНИЕ: База $DB_PATH не найдена, SSL может не примениться автоматически."
+  echo "ВНИМАНИЕ: Не найдено ни x-ui.db, ни config.json — SSL не был настроен автоматически."
 fi
 
 # Перезапуск панели
@@ -56,7 +70,12 @@ systemctl start x-ui
 IP="$(hostname -I | awk '{print $1}')"
 echo "========================================"
 echo " Установка завершена!"
-echo " Панель доступна по адресу:"
+if [ $UPDATED -eq 1 ]; then
+  echo " Панель настроена на HTTPS."
+else
+  echo " Панель установлена, но SSL не был прописан автоматически."
+fi
+echo " Доступ к панели:"
 echo "   https://$IP:54321"
 echo ""
 echo " Логин/пароль для входа были показаны установщиком 3x-ui."
