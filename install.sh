@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Установка XRAY + 3x-ui с автоподключением SSL
-# После запуска панель будет доступна по https://<IP>:<PORT>
+# После запуска панель будет доступна по https://<IP>:<PORT>/<WebBasePath>
 set -euo pipefail
 
 echo "=== Установка XRAY + 3x-ui с SSL ==="
@@ -15,7 +15,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt update && apt install -y curl wget socat openssl sqlite3 jq
 
-# Установка 3x-ui с захватом вывода для получения порта
+# Установка 3x-ui с захватом вывода для получения порта и WebBasePath
 if ! command -v x-ui &> /dev/null; then
   echo "Устанавливаем 3x-ui..."
   INSTALL_LOG=$(mktemp)
@@ -25,8 +25,8 @@ else
 fi
 
 # Включаем сервис
-systemctl enable x-ui
-systemctl stop x-ui || true
+systemctl enable x-ui.service
+systemctl stop x-ui.service || true
 
 # Генерация сертификата
 CERT_DIR="/etc/ssl/self_signed_cert"
@@ -44,21 +44,29 @@ echo " - $CERT_DIR/self_signed.key"
 # Определяем конфигурацию панели
 CONFIG_PATH="/etc/x-ui/x-ui.json"
 PORT=""
+WEB_BASE_PATH=""
 UPDATED=0
 
-# Извлекаем порт из лога установки, если он был создан
+# Извлекаем порт и WebBasePath из лога установки
 if [ -n "${INSTALL_LOG:-}" ] && [ -f "$INSTALL_LOG" ]; then
   PORT=$(grep "Port: " "$INSTALL_LOG" | awk '{print $2}' | head -n 1)
+  WEB_BASE_PATH=$(grep "WebBasePath: " "$INSTALL_LOG" | awk '{print $2}' | head -n 1)
 fi
 
-# Если порт не найден, пытаемся извлечь из конфигурации
+# Если порт или WebBasePath не найдены, пытаемся извлечь из конфигурации
 if [ -z "$PORT" ] && [ -f "$CONFIG_PATH" ]; then
   PORT=$(jq -r '.port // "54321"' "$CONFIG_PATH")
 fi
+if [ -z "$WEB_BASE_PATH" ] && [ -f "$CONFIG_PATH" ]; then
+  WEB_BASE_PATH=$(jq -r '.webBasePath // ""' "$CONFIG_PATH")
+fi
 
-# Если порт так и не найден, используем значение по умолчанию
+# Если порт не найден, используем значение по умолчанию
 PORT=${PORT:-54321}
+# Если WebBasePath не найден, оставляем пустым
+WEB_BASE_PATH=${WEB_BASE_PATH:-}
 
+# Настройка SSL в конфигурации
 if [ -f "$CONFIG_PATH" ]; then
   echo "Обновляем конфигурацию панели через x-ui.json..."
   tmp=$(mktemp)
@@ -73,7 +81,7 @@ else
 fi
 
 # Перезапуск панели
-systemctl start x-ui
+systemctl start x-ui.service
 
 IP="$(hostname -I | awk '{print $1}')"
 echo "========================================"
@@ -84,7 +92,11 @@ else
   echo " Панель установлена, но SSL не был прописан автоматически."
 fi
 echo " Доступ к панели:"
-echo "   https://$IP:$PORT"
+if [ -n "$WEB_BASE_PATH" ]; then
+  echo "   https://$IP:$PORT/$WEB_BASE_PATH"
+else
+  echo "   https://$IP:$PORT"
+fi
 echo ""
 echo " Логин/пароль для входа были показаны установщиком 3x-ui."
 echo "========================================"
