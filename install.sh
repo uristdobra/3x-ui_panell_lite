@@ -15,10 +15,11 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt update && apt install -y curl wget socat openssl sqlite3 jq
 
-# Установка 3x-ui
+# Установка 3x-ui с захватом вывода для получения порта
 if ! command -v x-ui &> /dev/null; then
   echo "Устанавливаем 3x-ui..."
-  bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)
+  INSTALL_LOG=$(mktemp)
+  bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) | tee "$INSTALL_LOG"
 else
   echo "3x-ui уже установлена."
 fi
@@ -41,13 +42,24 @@ echo " - $CERT_DIR/self_signed.crt"
 echo " - $CERT_DIR/self_signed.key"
 
 # Определяем конфигурацию панели
-CONFIG_PATH="/usr/local/x-ui/x-ui.json"
+CONFIG_PATH="/etc/x-ui/x-ui.json"
 PORT=""
 UPDATED=0
 
-if [ -f "$CONFIG_PATH" ]; then
-  echo "Получаем порт из конфигурации..."
+# Извлекаем порт из лога установки, если он был создан
+if [ -n "${INSTALL_LOG:-}" ] && [ -f "$INSTALL_LOG" ]; then
+  PORT=$(grep "Port: " "$INSTALL_LOG" | awk '{print $2}' | head -n 1)
+fi
+
+# Если порт не найден, пытаемся извлечь из конфигурации
+if [ -z "$PORT" ] && [ -f "$CONFIG_PATH" ]; then
   PORT=$(jq -r '.port // "54321"' "$CONFIG_PATH")
+fi
+
+# Если порт так и не найден, используем значение по умолчанию
+PORT=${PORT:-54321}
+
+if [ -f "$CONFIG_PATH" ]; then
   echo "Обновляем конфигурацию панели через x-ui.json..."
   tmp=$(mktemp)
   jq \
@@ -57,8 +69,7 @@ if [ -f "$CONFIG_PATH" ]; then
     "$CONFIG_PATH" > "$tmp" && mv "$tmp" "$CONFIG_PATH"
   UPDATED=1
 else
-  echo "ВНИМАНИЕ: Не найден x-ui.json — SSL не был настроен автоматически."
-  PORT="54321" # Fallback port
+  echo "ВНИМАНИЕ: Не найден $CONFIG_PATH — SSL не был настроен автоматически."
 fi
 
 # Перезапуск панели
@@ -77,3 +88,6 @@ echo "   https://$IP:$PORT"
 echo ""
 echo " Логин/пароль для входа были показаны установщиком 3x-ui."
 echo "========================================"
+
+# Очистка временного лога
+[ -n "${INSTALL_LOG:-}" ] && [ -f "$INSTALL_LOG" ] && rm -f "$INSTALL_LOG"
