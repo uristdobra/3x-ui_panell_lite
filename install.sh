@@ -1,107 +1,79 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
 
-# === 3x-ui + self-signed SSL quick installer ==============================
-# Repo: https://github.com/uristdobra/3x-ui_panell_lite
-# ==========================================================================
+# Этот скрипт устанавливает панель 3x-UI (которая включает Xray как прокси-ядро), генерирует самоподписанные SSL-сертификаты и автоматически настраивает их в панели.
+# Запускать от root (sudo -i).
+# Поддерживает переменные окружения для настройки: XUI_INSTALL_URL, CERT_NAME, DAYS_VALID, XUI_CN, XUI_IP.
 
-if [[ $EUID -ne 0 ]]; then
-  echo "❌ Пожалуйста, запустите скрипт от root (sudo -i)."
-  exit 1
+# Установка зависимостей: curl, openssl, qrencode, sqlite3 (для обновления базы данных 3x-UI).
+if ! command -v curl &> /dev/null || ! command -v openssl &> /dev/null || ! command -v qrencode &> /dev/null || ! command -v sqlite3 &> /dev/null; then
+  sudo apt update && sudo apt install -y curl openssl qrencode sqlite3
+  if [ $? -ne 0 ]; then
+    echo "Ошибка установки зависимостей."
+    exit 1
+  fi
 fi
 
-# Определяем пакетный менеджер
-UPDATE_CMD=""
-INSTALL_CMD=""
-if command -v apt-get >/dev/null 2>&1; then
-  UPDATE_CMD="apt-get update -y"
-  INSTALL_CMD="apt-get install -y"
-elif command -v dnf >/dev/null 2>&1; then
-  UPDATE_CMD="dnf -y makecache"
-  INSTALL_CMD="dnf -y install"
-elif command -v yum >/dev/null 2>&1; then
-  UPDATE_CMD="yum -y makecache"
-  INSTALL_CMD="yum -y install"
+# Установка 3x-UI, если не установлена. Использует переменную XUI_INSTALL_URL или дефолтный URL.
+XUI_INSTALL_URL=${XUI_INSTALL_URL:-"https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh"}
+if ! command -v x-ui &> /dev/null; then
+  bash <(curl -Ls $XUI_INSTALL_URL)
+  if [ $? -ne 0 ]; then
+    echo "Ошибка установки 3x-UI."
+    exit 1
+  fi
 else
-  echo "❌ Неподдерживаемый дистрибутив (нет apt/dnf/yum)."
-  exit 1
+  echo "3x-UI уже установлен."
 fi
 
-# Обновляем кэш и ставим зависимости
-eval "$UPDATE_CMD"
-eval "$INSTALL_CMD" curl openssl qrencode >/dev/null 2>&1 || {
-  echo "❌ Не удалось установить зависимости (curl, openssl, qrencode)."
-  exit 1
-}
-
-# Установка 3x-ui (если не установлен)
-if ! command -v x-ui >/dev/null 2>&1; then
-  XUI_INSTALL_URL="${XUI_INSTALL_URL:-https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh}"
-  echo "📥 Устанавливаю 3x-ui из: $XUI_INSTALL_URL"
-  bash <(curl -fsSL "$XUI_INSTALL_URL")
+# Включение и запуск сервиса 3x-UI через systemd.
+systemctl daemon-reload
+if systemctl list-units --full -all | grep -Fq 'x-ui.service'; then
+  systemctl enable x-ui
+  systemctl start x-ui
 else
-  echo "✅ 3x-ui уже установлен, пропускаю установку."
+  x-ui
 fi
 
-# Стартуем сервис (если доступен systemd)
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl daemon-reload || true
-  systemctl enable --now x-ui || true
-fi
-
-# Генерация самоподписанного сертификата c SAN
-CERT_DIR="/etc/ssl/3x-ui"
-CERT_NAME="${CERT_NAME:-selfsigned}"
-DAYS_VALID="${DAYS_VALID:-3650}"
-CN="${XUI_CN:-$(hostname -f 2>/dev/null || echo localhost)}"
-IP="${XUI_IP:-$(hostname -I 2>/dev/null | awk '{print $1}' || echo 127.0.0.1)}"
-
+# Генерация самоподписанного сертификата RSA-2048 с SAN (Subject Alternative Name) для DNS и IP.
+CERT_DIR="/etc/ssl/self_signed_cert"
+CERT_NAME=${CERT_NAME:-"selfsigned"}
+DAYS_VALID=${DAYS_VALID:-3650}
+XUI_CN=${XUI_CN:-$(hostname -f)}
+XUI_IP=${XUI_IP:-$(hostname -I | awk '{print $1}')}
 mkdir -p "$CERT_DIR"
-chmod 700 "$CERT_DIR"
-
-OPENSSL_CNF="$CERT_DIR/openssl.cnf"
-cat > "$OPENSSL_CNF" <<EOF
-[req]
-default_bits = 2048
-prompt = no
-default_md = sha256
-x509_extensions = v3_req
-distinguished_name = dn
-
-[dn]
-C = US
-ST = State
-L = City
-O = 3x-ui
-OU = SelfSigned
-CN = $CN
-
-[v3_req]
-subjectAltName = @alt_names
-
-[alt_names]
-DNS.1 = $CN
-IP.1 = $IP
-EOF
-
-CRT_PATH="$CERT_DIR/$CERT_NAME.crt"
+CERT_PATH="$CERT_DIR/$CERT_NAME.crt"
 KEY_PATH="$CERT_DIR/$CERT_NAME.key"
 
-openssl req -x509 -nodes -days "$DAYS_VALID" -newkey rsa:2048   -keyout "$KEY_PATH"   -out "$CRT_PATH"   -config "$OPENSSL_CNF" >/dev/null 2>&1
+# Команда генерации сертификата с SAN: добавляет DNS и IP в расширения.
+openssl req -x509 -nodes -days $DAYS_VALID -newkey rsa:2048 \
+  -keyout "$KEY_PATH" \
+  -out "$CERT_PATH" \
+  -subj "/C=US/ST=State/L=City/O=Organization/OU=Department/CN=$XUI_CN" \
+  -addext "subjectAltName = DNS:$XUI_CN, IP:$XUI_IP"
 
-chmod 600 "$KEY_PATH"
+if [ $? -ne 0 ]; then
+  echo "Ошибка генерации сертификата."
+  exit 1
+fi
 
-echo
-echo "=== ✅ Готово ============================================================="
-echo "Сертификаты сгенерированы:"
-echo "  CRT: $CRT_PATH"
-echo "  KEY: $KEY_PATH"
-echo
-echo "👉 Дальше:"
-echo "  1) Зайдите в панель 3x-ui."
-echo "  2) В «Настройки панели» укажите эти пути."
-echo "  3) Сохраните и перезапустите панель."
-echo
+# Автоматическое размещение путей к сертификатам в настройках панели 3x-UI (обновление SQLite базы данных).
+DB_PATH="/usr/local/x-ui/x-ui.db"
+sqlite3 "$DB_PATH" "UPDATE settings SET value='$CERT_PATH' WHERE key='certFile';"
+sqlite3 "$DB_PATH" "UPDATE settings SET value='$KEY_PATH' WHERE key='keyFile';"
+
+# Перезапуск панели 3x-UI для применения изменений.
+systemctl restart x-ui
+
+# Вывод информации о завершении.
+echo "============================================================"
+echo "Установка завершена!"
+echo "Xray и панель 3x-UI установлены."
+echo "Сертификаты сгенерированы и автоматически настроены в панели."
+echo "Пути: Публичный ключ - $CERT_PATH, Приватный ключ - $KEY_PATH"
+echo "Доступ к панели: https://$XUI_CN:54321 (или по IP: https://$XUI_IP:54321)"
+echo "Логин и пароль по умолчанию: admin/admin (измените их в панели)."
+echo "============================================================"
+
 echo "Подсказки по CLI:"
 echo "  x-ui           # меню"
 echo "  x-ui status    # статус"
