@@ -68,7 +68,7 @@ WEB_BASE_PATH=${WEB_BASE_PATH:-}
 
 # Настройка SSL в конфигурации
 if [ -f "$CONFIG_PATH" ]; then
-  echo "Обновляем конфигурацию панели через x-ui.json..."
+  echo "Обновляем конфигурацию панели через $CONFIG_PATH..."
   tmp=$(mktemp)
   jq \
     --arg crt "$CERT_DIR/self_signed.crt" \
