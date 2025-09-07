@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# Этот скрипт устанавливает панель 3x-UI (которая включает Xray как прокси-ядро), генерирует самоподписанные SSL-сертификаты и автоматически настраивает их в панели.
+# Этот скрипт устанавливает панель 3x-UI (включает Xray), генерирует самоподписанные SSL-сертификаты и автоматически настраивает их в панели.
 # Запускать от root (sudo -i).
-# Поддерживает переменные окружения для настройки: XUI_INSTALL_URL, CERT_NAME, DAYS_VALID, XUI_CN, XUI_IP.
+# Поддерживает переменные окружения: XUI_INSTALL_URL, CERT_NAME, DAYS_VALID, XUI_CN, XUI_IP.
 
-# Установка зависимостей: curl, openssl, qrencode, sqlite3 (для обновления базы данных 3x-UI).
-if ! command -v curl &> /dev/null || ! command -v openssl &> /dev/null || ! command -v qrencode &> /dev/null || ! command -v sqlite3 &> /dev/null; then
-  sudo apt update && sudo apt install -y curl openssl qrencode sqlite3
+# Установка зависимостей: curl, openssl, sqlite3.
+if ! command -v curl &> /dev/null || ! command -v openssl &> /dev/null || ! command -v sqlite3 &> /dev/null; then
+  sudo apt update && sudo apt install -y curl openssl sqlite3
   if [ $? -ne 0 ]; then
     echo "Ошибка установки зависимостей."
     exit 1
@@ -49,7 +49,7 @@ openssl req -x509 -nodes -days $DAYS_VALID -newkey rsa:2048 \
   -keyout "$KEY_PATH" \
   -out "$CERT_PATH" \
   -subj "/C=US/ST=State/L=City/O=Organization/OU=Department/CN=$XUI_CN" \
-  -addext "subjectAltName = DNS:$XUI_CN, IP:$XUI_IP"
+  -addext "subjectAltName = DNS:$XUI_CN,IP:$XUI_IP"
 
 if [ $? -ne 0 ]; then
   echo "Ошибка генерации сертификата."
@@ -58,8 +58,13 @@ fi
 
 # Автоматическое размещение путей к сертификатам в настройках панели 3x-UI (обновление SQLite базы данных).
 DB_PATH="/usr/local/x-ui/x-ui.db"
-sqlite3 "$DB_PATH" "UPDATE settings SET value='$CERT_PATH' WHERE key='certFile';"
-sqlite3 "$DB_PATH" "UPDATE settings SET value='$KEY_PATH' WHERE key='keyFile';"
+if [ -f "$DB_PATH" ]; then
+  sqlite3 "$DB_PATH" "UPDATE settings SET value='$CERT_PATH' WHERE key='certFile';"
+  sqlite3 "$DB_PATH" "UPDATE settings SET value='$KEY_PATH' WHERE key='keyFile';"
+else
+  echo "Ошибка: база данных $DB_PATH не найдена. Проверьте установку 3x-UI."
+  exit 1
+fi
 
 # Перезапуск панели 3x-UI для применения изменений.
 systemctl restart x-ui
@@ -73,12 +78,3 @@ echo "Пути: Публичный ключ - $CERT_PATH, Приватный к�
 echo "Доступ к панели: https://$XUI_CN:54321 (или по IP: https://$XUI_IP:54321)"
 echo "Логин и пароль по умолчанию: admin/admin (измените их в панели)."
 echo "============================================================"
-
-echo "Подсказки по CLI:"
-echo "  x-ui           # меню"
-echo "  x-ui status    # статус"
-echo "  x-ui start     # запуск"
-echo "  x-ui enable    # автозапуск"
-
-echo "========================================================================="
-read -r
