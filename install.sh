@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Установка XRAY + 3x-ui с автоподключением SSL
-# После запуска панель будет доступна по https://<IP>:54321
+# После запуска панель будет доступна по https://<IP>:<PORT>
 set -euo pipefail
 
 echo "=== Установка XRAY + 3x-ui с SSL ==="
@@ -40,28 +40,25 @@ echo "Сертификат создан:"
 echo " - $CERT_DIR/self_signed.crt"
 echo " - $CERT_DIR/self_signed.key"
 
-# Определяем тип конфигурации панели
-DB_PATH="/etc/x-ui/x-ui.db"
-JSON_PATH="/etc/x-ui/config.json"
+# Определяем конфигурацию панели
+CONFIG_PATH="/usr/local/x-ui/x-ui.json"
+PORT=""
 UPDATED=0
 
-if [ -f "$DB_PATH" ]; then
-  echo "Обновляем конфигурацию панели через SQLite..."
-  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.crt' WHERE key='webCertFile';" || true
-  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.key' WHERE key='webKeyFile';" || true
-  sqlite3 "$DB_PATH" "UPDATE setting SET value='1' WHERE key='webEnableTLS';" || true
-  UPDATED=1
-elif [ -f "$JSON_PATH" ]; then
-  echo "Обновляем конфигурацию панели через config.json..."
+if [ -f "$CONFIG_PATH" ]; then
+  echo "Получаем порт из конфигурации..."
+  PORT=$(jq -r '.port // "54321"' "$CONFIG_PATH")
+  echo "Обновляем конфигурацию панели через x-ui.json..."
   tmp=$(mktemp)
   jq \
     --arg crt "$CERT_DIR/self_signed.crt" \
     --arg key "$CERT_DIR/self_signed.key" \
-    '.webCertFile=$crt | .webKeyFile=$key | .webEnableTLS=true' \
-    "$JSON_PATH" > "$tmp" && mv "$tmp" "$JSON_PATH"
+    '.certificateFile=$crt | .keyFile=$key | .enableTLS=true' \
+    "$CONFIG_PATH" > "$tmp" && mv "$tmp" "$CONFIG_PATH"
   UPDATED=1
 else
-  echo "ВНИМАНИЕ: Не найдено ни x-ui.db, ни config.json — SSL не был настроен автоматически."
+  echo "ВНИМАНИЕ: Не найден x-ui.json — SSL не был настроен автоматически."
+  PORT="54321" # Fallback port
 fi
 
 # Перезапуск панели
@@ -76,7 +73,7 @@ else
   echo " Панель установлена, но SSL не был прописан автоматически."
 fi
 echo " Доступ к панели:"
-echo "   https://$IP:54321"
+echo "   https://$IP:$PORT"
 echo ""
 echo " Логин/пароль для входа были показаны установщиком 3x-ui."
 echo "========================================"
