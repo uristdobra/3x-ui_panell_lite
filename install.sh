@@ -1,80 +1,63 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Установка XRAY + 3x-ui с автоподключением SSL
+# После запуска панель будет доступна по https://<IP>:54321
+set -euo pipefail
 
-# Этот скрипт устанавливает панель 3x-UI (включает Xray), генерирует самоподписанные SSL-сертификаты и автоматически настраивает их в панели.
-# Запускать от root (sudo -i).
-# Поддерживает переменные окружения: XUI_INSTALL_URL, CERT_NAME, DAYS_VALID, XUI_CN, XUI_IP.
+echo "=== Установка XRAY + 3x-ui с SSL ==="
 
-# Установка зависимостей: curl, openssl, sqlite3.
-if ! command -v curl &> /dev/null || ! command -v openssl &> /dev/null || ! command -v sqlite3 &> /dev/null; then
-  sudo apt update && sudo apt install -y curl openssl sqlite3
-  if [ $? -ne 0 ]; then
-    echo "Ошибка установки зависимостей."
-    exit 1
-  fi
+# Проверка root
+if [ "${EUID:-0}" -ne 0 ]; then
+  echo "Скрипт нужно запускать от root (sudo bash install.sh)"
+  exit 1
 fi
 
-# Установка 3x-UI, если не установлена. Использует переменную XUI_INSTALL_URL или дефолтный URL.
-XUI_INSTALL_URL=${XUI_INSTALL_URL:-"https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh"}
+# Установка зависимостей
+apt update && apt install -y curl wget socat openssl sqlite3
+
+# Установка 3x-ui
 if ! command -v x-ui &> /dev/null; then
-  bash <(curl -Ls $XUI_INSTALL_URL)
-  if [ $? -ne 0 ]; then
-    echo "Ошибка установки 3x-UI."
-    exit 1
-  fi
+  echo "Устанавливаем 3x-ui..."
+  bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh)
 else
-  echo "3x-UI уже установлен."
+  echo "3x-ui уже установлена."
 fi
 
-# Включение и запуск сервиса 3x-UI через systemd.
-systemctl daemon-reload
-if systemctl list-units --full -all | grep -Fq 'x-ui.service'; then
-  systemctl enable x-ui
-  systemctl start x-ui
-else
-  x-ui
-fi
+# Включаем сервис
+systemctl enable x-ui
+systemctl stop x-ui || true
 
-# Генерация самоподписанного сертификата RSA-2048 с SAN (Subject Alternative Name) для DNS и IP.
+# Генерация сертификата
 CERT_DIR="/etc/ssl/self_signed_cert"
-CERT_NAME=${CERT_NAME:-"selfsigned"}
-DAYS_VALID=${DAYS_VALID:-3650}
-XUI_CN=${XUI_CN:-$(hostname -f)}
-XUI_IP=${XUI_IP:-$(hostname -I | awk '{print $1}')}
 mkdir -p "$CERT_DIR"
-CERT_PATH="$CERT_DIR/$CERT_NAME.crt"
-KEY_PATH="$CERT_DIR/$CERT_NAME.key"
+CERT_CN="$(hostname -f 2>/dev/null || hostname)"
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+  -keyout "$CERT_DIR/self_signed.key" \
+  -out "$CERT_DIR/self_signed.crt" \
+  -subj "/C=RU/ST=Unknown/L=Unknown/O=3x-ui/OU=IT/CN=${CERT_CN}"
 
-# Команда генерации сертификата с SAN: добавляет DNS и IP в расширения.
-openssl req -x509 -nodes -days $DAYS_VALID -newkey rsa:2048 \
-  -keyout "$KEY_PATH" \
-  -out "$CERT_PATH" \
-  -subj "/C=US/ST=State/L=City/O=Organization/OU=Department/CN=$XUI_CN" \
-  -addext "subjectAltName = DNS:$XUI_CN,IP:$XUI_IP"
+echo "Сертификат создан:"
+echo " - $CERT_DIR/self_signed.crt"
+echo " - $CERT_DIR/self_signed.key"
 
-if [ $? -ne 0 ]; then
-  echo "Ошибка генерации сертификата."
-  exit 1
-fi
-
-# Автоматическое размещение путей к сертификатам в настройках панели 3x-UI (обновление SQLite базы данных).
-DB_PATH="/usr/local/x-ui/x-ui.db"
+# Настройка панели на использование SSL
+DB_PATH="/etc/x-ui/x-ui.db"
 if [ -f "$DB_PATH" ]; then
-  sqlite3 "$DB_PATH" "UPDATE settings SET value='$CERT_PATH' WHERE key='certFile';"
-  sqlite3 "$DB_PATH" "UPDATE settings SET value='$KEY_PATH' WHERE key='keyFile';"
+  echo "Обновляем конфигурацию панели (SQLite)..."
+  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.crt' WHERE key='webCertFile';"
+  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.key' WHERE key='webKeyFile';"
+  sqlite3 "$DB_PATH" "UPDATE setting SET value='1' WHERE key='webEnableTLS';"
 else
-  echo "Ошибка: база данных $DB_PATH не найдена. Проверьте установку 3x-UI."
-  exit 1
+  echo "ВНИМАНИЕ: База $DB_PATH не найдена, SSL может не примениться автоматически."
 fi
 
-# Перезапуск панели 3x-UI для применения изменений.
-systemctl restart x-ui
+# Перезапуск панели
+systemctl start x-ui
 
-# Вывод информации о завершении.
-echo "============================================================"
-echo "Установка завершена!"
-echo "Xray и панель 3x-UI установлены."
-echo "Сертификаты сгенерированы и автоматически настроены в панели."
-echo "Пути: Публичный ключ - $CERT_PATH, Приватный ключ - $KEY_PATH"
-echo "Доступ к панели: https://$XUI_CN:54321 (или по IP: https://$XUI_IP:54321)"
-echo "Логин и пароль по умолчанию: admin/admin (измените их в панели)."
-echo "============================================================"
+IP="$(hostname -I | awk '{print $1}')"
+echo "========================================"
+echo " Установка завершена!"
+echo " Панель доступна по адресу:"
+echo "   https://$IP:54321"
+echo ""
+echo " Логин/пароль для входа были показаны установщиком 3x-ui."
+echo "========================================"
