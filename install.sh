@@ -11,6 +11,26 @@ if [ "${EUID:-0}" -ne 0 ]; then
   exit 1
 fi
 
+# Функция для проверки и ожидания освобождения блокировки apt
+wait_for_apt() {
+  local timeout=300  # Максимальное время ожидания в секундах (5 минут)
+  local interval=5   # Интервал проверки в секундах
+  local elapsed=0
+
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    echo "Ожидание освобождения блокировки apt (процесс: $(fuser /var/lib/dpkg/lock-frontend 2>/dev/null))..."
+    sleep $interval
+    elapsed=$((elapsed + interval))
+    if [ $elapsed -ge $timeout ]; then
+      echo "Ошибка: Не удалось дождаться освобождения блокировки apt в течение $timeout секунд."
+      exit 1
+    fi
+  done
+}
+
+# Ожидание освобождения блокировки apt
+wait_for_apt
+
 # Установка зависимостей
 export DEBIAN_FRONTEND=noninteractive
 apt update && apt install -y curl wget socat openssl sqlite3 jq
