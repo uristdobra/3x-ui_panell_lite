@@ -11,28 +11,45 @@ if [ "${EUID:-0}" -ne 0 ]; then
   exit 1
 fi
 
-# Функция для проверки и ожидания освобождения блокировки apt
+# Функция для проверки и освобождения блокировок apt
 wait_for_apt() {
   local timeout=300  # Максимальное время ожидания в секундах (5 минут)
   local interval=5   # Интервал проверки в секундах
   local elapsed=0
+  local lock_files=("/var/lib/dpkg/lock-frontend" "/var/cache/apt/archives/lock" "/var/lib/apt/lists/lock")
 
-  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-    echo "Ожидание освобождения блокировки apt (процесс: $(fuser /var/lib/dpkg/lock-frontend 2>/dev/null))..."
-    sleep $interval
-    elapsed=$((elapsed + interval))
-    if [ $elapsed -ge $timeout ]; then
-      echo "Ошибка: Не удалось дождаться освобождения блокировки apt в течение $timeout секунд."
-      exit 1
-    fi
+  # Проверяем все файлы блокировки
+  for lock in "${lock_files[@]}"; do
+    while fuser "$lock" >/dev/null 2>&1; do
+      echo "Ожидание освобождения блокировки $lock (процесс: $(fuser "$lock" 2>/dev/null))..."
+      sleep $interval
+      elapsed=$((elapsed + interval))
+      if [ $elapsed -ge $timeout ]; then
+        echo "Предупреждение: Не удалось дождаться освобождения блокировки $lock в течение $timeout секунд."
+        echo "Попытка остановить unattended-upgrades..."
+        systemctl stop unattended-upgrades || true
+        sleep 5
+        # Проверяем ещё раз
+        if fuser "$lock" >/dev/null 2>&1; then
+          echo "Ошибка: Блокировка $lock всё ещё удерживается. Завершение."
+          exit 1
+        fi
+        break
+      fi
+    done
   done
 }
 
-# Ожидание освобождения блокировки apt
+# Остановка unattended-upgrades перед началом
+echo "Останавливаем unattended-upgrades, чтобы избежать конфликтов..."
+systemctl stop unattended-upgrades || true
+
+# Ожидание освобождения блокировок apt
 wait_for_apt
 
 # Установка зависимостей
 export DEBIAN_FRONTEND=noninteractive
+echo "Обновляем пакеты и устанавливаем зависимости..."
 apt update && apt install -y curl wget socat openssl sqlite3 jq
 
 # Установка 3x-ui с захватом вывода для получения порта и WebBasePath
@@ -123,3 +140,7 @@ echo "========================================"
 
 # Очистка временного лога
 [ -n "${INSTALL_LOG:-}" ] && [ -f "$INSTALL_LOG" ] && rm -f "$INSTALL_LOG"
+
+# Восстановление unattended-upgrades
+echo "Восстанавливаем unattended-upgrades..."
+systemctl start unattended-upgrades || true
