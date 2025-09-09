@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Установка XRAY + 3x-ui с автоподключением SSL и извлечением URL
-# Исправлена проблема с отсутствующим "/" между портом и WebBasePath
 set -euo pipefail
 
 echo "=== Установка XRAY + 3x-ui с SSL ==="
@@ -18,17 +17,10 @@ INSTALL_LOG="/var/log/x-ui-install.log"
 
 if ! command -v x-ui &> /dev/null; then
   echo "Устанавливаем 3x-ui..."
-  # сохраняем вывод установщика в лог
   bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) | tee "$INSTALL_LOG"
 else
   echo "3x-ui уже установлена."
   x-ui stop || true
-  # если панели не устанавливали в этой сессии, постараемся найти существующий лог
-  if [ ! -f "$INSTALL_LOG" ]; then
-    echo "(INFO) Файл лога установки не найден: $INSTALL_LOG"
-    # создаём пустой файл, чтобы последующие grep не падали
-    : > "$INSTALL_LOG"
-  fi
 fi
 
 # Генерация сертификата
@@ -44,38 +36,46 @@ echo "Сертификат создан:"
 echo " - $CERT_DIR/self_signed.crt"
 echo " - $CERT_DIR/self_signed.key"
 
-# Прописываем сертификаты в SQLite (таблица settings) — безопасно: UPDATE если есть, иначе INSERT
+# Прописываем сертификаты в SQLite (таблица settings)
 DB_PATH="/etc/x-ui/x-ui.db"
 if [ -f "$DB_PATH" ]; then
   echo "Прописываем SSL в базу $DB_PATH..."
-  # webCertFile
-  cnt=$(sqlite3 "$DB_PATH" "SELECT COUNT(1) FROM settings WHERE key='webCertFile';")
-  if [ "$cnt" -gt 0 ]; then
-    sqlite3 "$DB_PATH" "UPDATE settings SET value='$CERT_DIR/self_signed.crt' WHERE key='webCertFile';"
-  else
-    sqlite3 "$DB_PATH" "INSERT INTO settings (key, value) VALUES ('webCertFile', '$CERT_DIR/self_signed.crt');"
-  fi
-  # webKeyFile
-  cnt=$(sqlite3 "$DB_PATH" "SELECT COUNT(1) FROM settings WHERE key='webKeyFile';")
-  if [ "$cnt" -gt 0 ]; then
-    sqlite3 "$DB_PATH" "UPDATE settings SET value='$CERT_DIR/self_signed.key' WHERE key='webKeyFile';"
-  else
-    sqlite3 "$DB_PATH" "INSERT INTO settings (key, value) VALUES ('webKeyFile', '$CERT_DIR/self_signed.key');"
-  fi
-  # webEnableTLS
-  cnt=$(sqlite3 "$DB_PATH" "SELECT COUNT(1) FROM settings WHERE key='webEnableTLS';")
-  if [ "$cnt" -gt 0 ]; then
-    sqlite3 "$DB_PATH" "UPDATE settings SET value='1' WHERE key='webEnableTLS';"
-  else
-    sqlite3 "$DB_PATH" "INSERT INTO settings (key, value) VALUES ('webEnableTLS', '1');"
-  fi
+  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (id, key, value)
+    VALUES ((SELECT id FROM settings WHERE key='webCertFile'),'webCertFile','$CERT_DIR/self_signed.crt');"
+  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (id, key, value)
+    VALUES ((SELECT id FROM settings WHERE key='webKeyFile'),'webKeyFile','$CERT_DIR/self_signed.key');"
+  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (id, key, value)
+    VALUES ((SELECT id FROM settings WHERE key='webEnableTLS'),'webEnableTLS','1');"
 else
   echo "ВНИМАНИЕ: база $DB_PATH не найдена, SSL не был прописан автоматически."
 fi
 
 # Перезапускаем панель
-systemctl restart x-ui || {
-  echo "Ошибка при рестарте x-ui. Посмотрите 'systemctl status x-ui' и логи."
-}
+systemctl restart x-ui
 
-# Извлекаем данные из лога у
+# Извлекаем данные из лога установки
+USERNAME=$(grep -m1 "Username:" "$INSTALL_LOG" | awk '{print $2}')
+PASSWORD=$(grep -m1 "Password:" "$INSTALL_LOG" | awk '{print $2}')
+PORT=$(grep -m1 "Port:" "$INSTALL_LOG" | awk '{print $2}')
+WEBPATH=$(grep -m1 "WebBasePath:" "$INSTALL_LOG" | awk '{print $2}')
+IP=$(hostname -I | awk '{print $1}')
+
+# Добавляем "/" перед WebBasePath, если его нет
+if [ -n "$WEBPATH" ]; then
+  case "$WEBPATH" in
+    /*) PATHPART="$WEBPATH" ;;
+    *) PATHPART="/$WEBPATH" ;;
+  esac
+else
+  PATHPART=""
+fi
+
+# Итог
+echo "========================================"
+echo " Установка завершена!"
+echo " Панель доступна по адресу:"
+echo "   https://$IP:$PORT$PATHPART"
+echo ""
+echo " Логин:    $USERNAME"
+echo " Пароль:   $PASSWORD"
+echo "========================================"
