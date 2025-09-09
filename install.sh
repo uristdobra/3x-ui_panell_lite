@@ -10,7 +10,7 @@ if [ "${EUID:-0}" -ne 0 ]; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
-apt update && apt install -y curl wget socat openssl sqlite3
+apt update && apt install -y curl wget socat openssl sqlite3 jq
 
 # Лог установки
 INSTALL_LOG="/var/log/x-ui-install.log"
@@ -36,14 +36,18 @@ echo "Сертификат создан:"
 echo " - $CERT_DIR/self_signed.crt"
 echo " - $CERT_DIR/self_signed.key"
 
-# Прописываем сертификаты в SQLite
+# Прописываем сертификаты в SQLite (таблица settings)
 DB_PATH="/etc/x-ui/x-ui.db"
 if [ -f "$DB_PATH" ]; then
-  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.crt' WHERE key='webCertFile';"
-  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.key' WHERE key='webKeyFile';"
-  sqlite3 "$DB_PATH" "UPDATE setting SET value='1' WHERE key='webEnableTLS';"
+  echo "Прописываем SSL в базу $DB_PATH..."
+  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (id, key, value)
+    VALUES ((SELECT id FROM settings WHERE key='webCertFile'),'webCertFile','$CERT_DIR/self_signed.crt');"
+  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (id, key, value)
+    VALUES ((SELECT id FROM settings WHERE key='webKeyFile'),'webKeyFile','$CERT_DIR/self_signed.key');"
+  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (id, key, value)
+    VALUES ((SELECT id FROM settings WHERE key='webEnableTLS'),'webEnableTLS','1');"
 else
-  echo "ВНИМАНИЕ: база $DB_PATH не найдена, SSL может не примениться."
+  echo "ВНИМАНИЕ: база $DB_PATH не найдена, SSL не был прописан автоматически."
 fi
 
 # Перезапускаем панель
@@ -60,7 +64,7 @@ IP=$(hostname -I | awk '{print $1}')
 echo "========================================"
 echo " Установка завершена!"
 echo " Панель доступна по адресу:"
-echo "   https://$IP:$PORT/$WEBPATH"
+echo "   https://$IP:$PORT$WEBPATH"
 echo ""
 echo " Логин:    $USERNAME"
 echo " Пароль:   $PASSWORD"
