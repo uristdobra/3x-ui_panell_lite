@@ -60,21 +60,11 @@ PORT=$(grep -m1 "Port:" "$INSTALL_LOG" | awk '{print $2}')
 WEBPATH=$(grep -m1 "WebBasePath:" "$INSTALL_LOG" | awk '{print $2}')
 IP=$(hostname -I | awk '{print $1}')
 
-# Добавляем "/" перед WebBasePath, если его нет
-if [ -n "$WEBPATH" ]; then
-  case "$WEBPATH" in
-    /*) PATHPART="$WEBPATH" ;;
-    *) PATHPART="/$WEBPATH" ;;
-  esac
-else
-  PATHPART=""
-fi
-
 # Итог
 echo "========================================"
 echo " Установка завершена!"
 echo " Панель доступна по адресу:"
-echo "   https://$IP:$PORT$PATHPART"
+echo "   https://$IP:$PORT/$WEBPATH"
 echo ""
 echo " Логин:    $USERNAME"
 echo " Пароль:   $PASSWORD"
