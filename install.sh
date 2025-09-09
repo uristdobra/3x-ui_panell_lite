@@ -1,69 +1,27 @@
 #!/usr/bin/env bash
-# Установка XRAY + 3x-ui с автоподключением SSL
-# После запуска панель будет доступна по https://<IP>:<PORT>/<WebBasePath>
+# Установка XRAY + 3x-ui с автоподключением SSL и извлечением URL
 set -euo pipefail
 
 echo "=== Установка XRAY + 3x-ui с SSL ==="
 
-# Проверка root
 if [ "${EUID:-0}" -ne 0 ]; then
   echo "Скрипт нужно запускать от root (sudo bash install.sh)"
   exit 1
 fi
 
-# Функция для проверки и освобождения блокировок apt
-wait_for_apt() {
-  local timeout=300  # Максимальное время ожидания в секундах (5 минут)
-  local interval=5   # Интервал проверки в секундах
-  local elapsed=0
-  local lock_files=("/var/lib/dpkg/lock-frontend" "/var/cache/apt/archives/lock" "/var/lib/apt/lists/lock")
-
-  # Проверяем все файлы блокировки
-  for lock in "${lock_files[@]}"; do
-    while fuser "$lock" >/dev/null 2>&1; do
-      echo "Ожидание освобождения блокировки $lock (процесс: $(fuser "$lock" 2>/dev/null))..."
-      sleep $interval
-      elapsed=$((elapsed + interval))
-      if [ $elapsed -ge $timeout ]; then
-        echo "Предупреждение: Не удалось дождаться освобождения блокировки $lock в течение $timeout секунд."
-        echo "Попытка остановить unattended-upgrades..."
-        systemctl stop unattended-upgrades || true
-        sleep 5
-        # Проверяем ещё раз
-        if fuser "$lock" >/dev/null 2>&1; then
-          echo "Ошибка: Блокировка $lock всё ещё удерживается. Завершение."
-          exit 1
-        fi
-        break
-      fi
-    done
-  done
-}
-
-# Остановка unattended-upgrades перед началом
-echo "Останавливаем unattended-upgrades, чтобы избежать конфликтов..."
-systemctl stop unattended-upgrades || true
-
-# Ожидание освобождения блокировок apt
-wait_for_apt
-
-# Установка зависимостей
 export DEBIAN_FRONTEND=noninteractive
-echo "Обновляем пакеты и устанавливаем зависимости..."
-apt update && apt install -y curl wget socat openssl sqlite3 jq
+apt update && apt install -y curl wget socat openssl sqlite3
 
-# Установка 3x-ui с захватом вывода для получения порта и WebBasePath
+# Лог установки
+INSTALL_LOG="/var/log/x-ui-install.log"
+
 if ! command -v x-ui &> /dev/null; then
   echo "Устанавливаем 3x-ui..."
-  INSTALL_LOG=$(mktemp)
   bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) | tee "$INSTALL_LOG"
 else
   echo "3x-ui уже установлена."
+  x-ui stop || true
 fi
-
-# Включаем сервис
-systemctl enable x-ui.service
-systemctl stop x-ui.service || true
 
 # Генерация сертификата
 CERT_DIR="/etc/ssl/self_signed_cert"
@@ -78,69 +36,32 @@ echo "Сертификат создан:"
 echo " - $CERT_DIR/self_signed.crt"
 echo " - $CERT_DIR/self_signed.key"
 
-# Определяем конфигурацию панели
-CONFIG_PATH="/etc/x-ui/x-ui.json"
-PORT=""
-WEB_BASE_PATH=""
-UPDATED=0
-
-# Извлекаем порт и WebBasePath из лога установки
-if [ -n "${INSTALL_LOG:-}" ] && [ -f "$INSTALL_LOG" ]; then
-  PORT=$(grep "Port: " "$INSTALL_LOG" | awk '{print $2}' | head -n 1)
-  WEB_BASE_PATH=$(grep "WebBasePath: " "$INSTALL_LOG" | awk '{print $2}' | head -n 1)
-fi
-
-# Если порт или WebBasePath не найдены, пытаемся извлечь из конфигурации
-if [ -z "$PORT" ] && [ -f "$CONFIG_PATH" ]; then
-  PORT=$(jq -r '.port // "54321"' "$CONFIG_PATH")
-fi
-if [ -z "$WEB_BASE_PATH" ] && [ -f "$CONFIG_PATH" ]; then
-  WEB_BASE_PATH=$(jq -r '.webBasePath // ""' "$CONFIG_PATH")
-fi
-
-# Если порт не найден, используем значение по умолчанию
-PORT=${PORT:-54321}
-# Если WebBasePath не найден, оставляем пустым
-WEB_BASE_PATH=${WEB_BASE_PATH:-}
-
-# Настройка SSL в конфигурации
-if [ -f "$CONFIG_PATH" ]; then
-  echo "Обновляем конфигурацию панели через $CONFIG_PATH..."
-  tmp=$(mktemp)
-  jq \
-    --arg crt "$CERT_DIR/self_signed.crt" \
-    --arg key "$CERT_DIR/self_signed.key" \
-    '.certificateFile=$crt | .keyFile=$key | .enableTLS=true' \
-    "$CONFIG_PATH" > "$tmp" && mv "$tmp" "$CONFIG_PATH"
-  UPDATED=1
+# Прописываем сертификаты в SQLite
+DB_PATH="/etc/x-ui/x-ui.db"
+if [ -f "$DB_PATH" ]; then
+  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.crt' WHERE key='webCertFile';"
+  sqlite3 "$DB_PATH" "UPDATE setting SET value='$CERT_DIR/self_signed.key' WHERE key='webKeyFile';"
+  sqlite3 "$DB_PATH" "UPDATE setting SET value='1' WHERE key='webEnableTLS';"
 else
-  echo "ВНИМАНИЕ: Не найден $CONFIG_PATH — SSL не был настроен автоматически."
+  echo "ВНИМАНИЕ: база $DB_PATH не найдена, SSL может не примениться."
 fi
 
-# Перезапуск панели
-systemctl start x-ui.service
+# Перезапускаем панель
+systemctl restart x-ui
 
-IP="$(hostname -I | awk '{print $1}')"
+# Извлекаем данные из лога установки
+USERNAME=$(grep -m1 "Username:" "$INSTALL_LOG" | awk '{print $2}')
+PASSWORD=$(grep -m1 "Password:" "$INSTALL_LOG" | awk '{print $2}')
+PORT=$(grep -m1 "Port:" "$INSTALL_LOG" | awk '{print $2}')
+WEBPATH=$(grep -m1 "WebBasePath:" "$INSTALL_LOG" | awk '{print $2}')
+IP=$(hostname -I | awk '{print $1}')
+
+# Итог
 echo "========================================"
 echo " Установка завершена!"
-if [ $UPDATED -eq 1 ]; then
-  echo " Панель настроена на HTTPS."
-else
-  echo " Панель установлена, но SSL не был прописан автоматически."
-fi
-echo " Доступ к панели:"
-if [ -n "$WEB_BASE_PATH" ]; then
-  echo "   https://$IP:$PORT/$WEB_BASE_PATH"
-else
-  echo "   https://$IP:$PORT"
-fi
+echo " Панель доступна по адресу:"
+echo "   https://$IP:$PORT/$WEBPATH"
 echo ""
-echo " Логин/пароль для входа были показаны установщиком 3x-ui."
+echo " Логин:    $USERNAME"
+echo " Пароль:   $PASSWORD"
 echo "========================================"
-
-# Очистка временного лога
-[ -n "${INSTALL_LOG:-}" ] && [ -f "$INSTALL_LOG" ] && rm -f "$INSTALL_LOG"
-
-# Восстановление unattended-upgrades
-echo "Восстанавливаем unattended-upgrades..."
-systemctl start unattended-upgrades || true
